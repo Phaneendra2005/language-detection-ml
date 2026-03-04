@@ -10,7 +10,7 @@ from preprocessing import preprocess
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "language_model.pkl")
 
-CONFIDENCE_THRESHOLD = 0.30
+CONFIDENCE_THRESHOLD = 0.55
 
 LANGUAGE_FLAGS = {
     "English": "🇬🇧",
@@ -128,12 +128,12 @@ def predict_language(text, return_all=False):
 
     if confidence < CONFIDENCE_THRESHOLD:
         return {
-            "valid": True,
-            "language": None,
-            "confidence": confidence,
-            "flag": "⚠️",
-            "message": "Text is ambiguous. Please enter longer text.",
-            "all_scores": {}
+        "valid": False,
+        "language": None,
+        "confidence": confidence,
+        "flag": "❌",
+        "message": "Invalid input. Please enter meaningful words or sentences.",
+        "all_scores": {}
         }
 
     flag = LANGUAGE_FLAGS.get(language, "🌐")
