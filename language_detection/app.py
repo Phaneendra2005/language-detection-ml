@@ -40,10 +40,10 @@ def predict():
     return jsonify(result)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("\n" + "="*50)
     print("  Language Detection — Web Interface")
-    print("  Open your browser and go to:")
-    print("  http://localhost:5000")
+    print("  Server is starting...")
     print("="*50 + "\n")
-    app.run(debug=True, port=5000)
+
+    app.run(host="0.0.0.0", port=10000)
