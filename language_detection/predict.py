@@ -1,7 +1,3 @@
-"""
-predict.py — Predict the language of a given text.
-"""
-
 import argparse
 import os
 import pickle
@@ -44,15 +40,15 @@ LANGUAGE_FLAGS = {
 _cached_model = None
 
 
-def load_model(model_path: str = DEFAULT_MODEL_PATH):
+def load_model(model_path=DEFAULT_MODEL_PATH):
+
     global _cached_model
+
     if _cached_model is not None:
         return _cached_model
 
     if not os.path.exists(model_path):
-        raise FileNotFoundError(
-            f"Model not found at '{model_path}'. Run python train.py first."
-        )
+        raise FileNotFoundError("Model not found. Run train.py first.")
 
     with open(model_path, "rb") as f:
         _cached_model = pickle.load(f)
@@ -60,30 +56,52 @@ def load_model(model_path: str = DEFAULT_MODEL_PATH):
     return _cached_model
 
 
-def is_valid_text(text: str) -> bool:
-    """
-    Validate that input contains actual language characters.
-    Reject numbers, symbols, emoji, etc.
-    """
-    if not text.strip():
+# ─────────────────────────────────────────────
+# TEXT VALIDATION
+# ─────────────────────────────────────────────
+
+def is_valid_text(text):
+
+    text = text.strip()
+
+    if len(text) < 3:
         return False
 
-    # Must contain at least one letter from major scripts
-    pattern = r"[A-Za-z\u0C00-\u0C7F\u0600-\u06FF\u4E00-\u9FFF\u0900-\u097F]"
-    return bool(re.search(pattern, text))
+    # Must contain letters from supported scripts
+    letter_pattern = r"[A-Za-z\u0900-\u097F\u0C00-\u0C7F\u0600-\u06FF\u4E00-\u9FFF]"
+    if not re.search(letter_pattern, text):
+        return False
+
+    # Reject numbers or symbols only
+    if re.fullmatch(r"[0-9\W_]+", text):
+        return False
+
+    # Reject repeated characters
+    if len(set(text.lower())) <= 2:
+        return False
+
+    # Latin text must contain vowel
+    if re.match(r"^[A-Za-z\s]+$", text):
+        if not re.search(r"[aeiou]", text.lower()):
+            return False
+
+    return True
 
 
-def predict_language(text: str, model_path: str = DEFAULT_MODEL_PATH, return_all=False):
+# ─────────────────────────────────────────────
+# LANGUAGE PREDICTION
+# ─────────────────────────────────────────────
 
-    # Validate input first
+def predict_language(text, return_all=False):
+
     if not is_valid_text(text):
         return {
             "valid": False,
             "language": None,
             "confidence": None,
             "flag": "❌",
-            "message": "Please enter valid text containing real words.",
-            "all_scores": {},
+            "message": "Invalid input. Please enter meaningful text using real words or sentences in any language.",
+            "all_scores": {}
         }
 
     cleaned, valid = preprocess(text)
@@ -94,18 +112,19 @@ def predict_language(text: str, model_path: str = DEFAULT_MODEL_PATH, return_all
             "language": None,
             "confidence": None,
             "flag": "❌",
-            "message": "Invalid text — please enter a meaningful sentence.",
-            "all_scores": {},
+            "message": "Invalid text after preprocessing.",
+            "all_scores": {}
         }
 
-    model = load_model(model_path)
+    model = load_model()
 
     proba = model.predict_proba([cleaned])[0]
     classes = model.classes_
 
-    top_idx = proba.argmax()
-    language = classes[top_idx]
-    confidence = float(proba[top_idx])
+    idx = proba.argmax()
+
+    language = classes[idx]
+    confidence = float(proba[idx])
 
     if confidence < CONFIDENCE_THRESHOLD:
         return {
@@ -113,8 +132,8 @@ def predict_language(text: str, model_path: str = DEFAULT_MODEL_PATH, return_all
             "language": None,
             "confidence": confidence,
             "flag": "⚠️",
-            "message": "Text is ambiguous. Please enter a longer sentence.",
-            "all_scores": dict(zip(classes, proba.tolist())) if return_all else {},
+            "message": "Text is ambiguous. Please enter longer text.",
+            "all_scores": {}
         }
 
     flag = LANGUAGE_FLAGS.get(language, "🌐")
@@ -128,32 +147,20 @@ def predict_language(text: str, model_path: str = DEFAULT_MODEL_PATH, return_all
     }
 
     if return_all:
-        result["all_scores"] = dict(
-            sorted(zip(classes, proba.tolist()), key=lambda x: x[1], reverse=True)
-        )
-    else:
-        result["all_scores"] = {}
+        result["all_scores"] = dict(zip(classes, proba.tolist()))
 
     return result
 
 
-def print_result(result: dict):
-    print("\n", result["message"], "\n")
-
-
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--text", "-t", type=str)
-    args = parser.parse_args()
+    while True:
 
-    if args.text:
-        result = predict_language(args.text)
-        print_result(result)
-    else:
-        while True:
-            text = input("Enter text: ")
-            if text.lower() in ["exit", "quit"]:
-                break
-            result = predict_language(text)
-            print_result(result)
+        text = input("Enter text: ")
+
+        if text.lower() in ["exit", "quit"]:
+            break
+
+        result = predict_language(text)
+
+        print(result["message"])
