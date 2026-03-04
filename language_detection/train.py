@@ -1,18 +1,5 @@
 """
-train.py — Train the language detection model.
-
-Pipeline:
-    1. Load dataset (CSV with columns: Text, Language)
-    2. Preprocess & filter rows
-    3. Extract character n-gram TF-IDF features
-    4. Train LinearSVC (best balance of speed vs accuracy for langid)
-    5. Wrap in a Pipeline and evaluate with cross-validation
-    6. Save model + vectorizer to models/
-
-Usage:
-    python train.py                       # uses default dataset path
-    python train.py --dataset my_data.csv
-    python train.py --dataset my_data.csv --model-dir models/
+train.py — Train the language detection model
 """
 
 import argparse
@@ -20,6 +7,7 @@ import os
 import sys
 import pickle
 import time
+import re
 
 import numpy as np
 import pandas as pd
@@ -28,154 +16,220 @@ from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.metrics import classification_report, accuracy_score
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-# Make sure src/ is on the path when running from project root
+# Add src path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-
 from preprocessing import preprocess
-from feature_extraction import build_vectorizer
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATASET = os.path.join(PROJECT_ROOT, "data", "dataset.csv")
 DEFAULT_MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
-MODEL_PATH = os.path.join(DEFAULT_MODEL_DIR, "language_model.pkl")
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# TEXT VALIDATION (same logic as prediction)
+# ─────────────────────────────────────────────────────────────
+
+def is_valid_text(text: str) -> bool:
+    """
+    Accept only real language characters.
+    Reject numbers / symbols / emoji.
+    """
+    if not text.strip():
+        return False
+
+    pattern = r"[A-Za-z\u0C00-\u0C7F\u0600-\u06FF\u4E00-\u9FFF\u0900-\u097F]"
+    return bool(re.search(pattern, text))
+
+
+# ─────────────────────────────────────────────────────────────
+# DATASET LOADING
+# ─────────────────────────────────────────────────────────────
 
 def load_and_clean_dataset(path: str) -> pd.DataFrame:
-    """Load CSV, drop nulls, run preprocessing filter."""
+
     print(f"Loading dataset from: {path}")
     df = pd.read_csv(path)
 
-    # Support both column name variants
     if "Text" not in df.columns and "text" in df.columns:
         df.rename(columns={"text": "Text", "language": "Language"}, inplace=True)
 
     required = {"Text", "Language"}
     if not required.issubset(df.columns):
-        raise ValueError(f"Dataset must have columns {required}. Found: {list(df.columns)}")
+        raise ValueError("Dataset must contain Text and Language columns")
 
-    initial_len = len(df)
     df = df.dropna(subset=["Text", "Language"])
     df["Text"] = df["Text"].astype(str)
 
-    # Apply preprocessing filter
     cleaned_rows = []
+
     for _, row in df.iterrows():
-        cleaned, valid = preprocess(row["Text"])
+
+        text = row["Text"]
+
+        # Reject invalid text
+        if not is_valid_text(text):
+            continue
+
+        cleaned, valid = preprocess(text)
+
         if valid:
-            cleaned_rows.append({"Text": cleaned, "Language": row["Language"].strip()})
+            cleaned_rows.append({
+                "Text": cleaned,
+                "Language": row["Language"].strip()
+            })
 
     df_clean = pd.DataFrame(cleaned_rows)
-    print(f"Rows: {initial_len} → {len(df_clean)} after cleaning")
+    # Remove languages with too few samples
+    counts = df_clean["Language"].value_counts()
+    valid_langs = counts[counts >= 3].index
+    df_clean = df_clean[df_clean["Language"].isin(valid_langs)]
+
+    print(f"\nDataset cleaned")
+    print(f"Samples: {len(df_clean)}")
     print(f"Languages: {sorted(df_clean['Language'].unique())}")
-    print(f"Samples per language:\n{df_clean['Language'].value_counts().to_string()}\n")
+    print(df_clean["Language"].value_counts())
+
     return df_clean
 
 
-def build_pipeline() -> Pipeline:
-    """
-    Full sklearn Pipeline:
-        TF-IDF (char 2-4 grams)  →  LinearSVC (calibrated for probabilities)
+# ─────────────────────────────────────────────────────────────
+# VECTOR FEATURE EXTRACTION
+# ─────────────────────────────────────────────────────────────
 
-    Why LinearSVC?
-    - Consistently achieves 97-100% accuracy on language identification tasks
-    - Fast to train and predict
-    - Works well with high-dimensional sparse TF-IDF features
-    - CalibratedClassifierCV adds .predict_proba() so we can show confidence scores
-    """
+def build_vectorizer():
+
+    return TfidfVectorizer(
+        analyzer="char",
+        ngram_range=(2, 4),        # Best for language detection
+        min_df=2,
+        max_features=50000,
+        lowercase=True
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# PIPELINE
+# ─────────────────────────────────────────────────────────────
+
+def build_pipeline():
+
     vectorizer = build_vectorizer()
+
     classifier = CalibratedClassifierCV(
         LinearSVC(
             C=5.0,
             max_iter=3000,
-            dual=True,
-            class_weight="balanced",   # handles class imbalance automatically
+            class_weight="balanced"
         ),
-        cv=3,
+        cv=2
     )
-    return Pipeline([
+
+    pipeline = Pipeline([
         ("tfidf", vectorizer),
-        ("clf", classifier),
+        ("clf", classifier)
     ])
 
+    return pipeline
 
-def train(dataset_path: str = DEFAULT_DATASET, model_dir: str = DEFAULT_MODEL_DIR) -> None:
+
+# ─────────────────────────────────────────────────────────────
+# TRAINING
+# ─────────────────────────────────────────────────────────────
+
+def train(dataset_path=DEFAULT_DATASET, model_dir=DEFAULT_MODEL_DIR):
+
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, "language_model.pkl")
 
-    # ── 1. Load data ──────────────────────────────────────────────────────────
     df = load_and_clean_dataset(dataset_path)
+
     X = df["Text"].values
     y = df["Language"].values
 
-    # ── 2. Train / test split ─────────────────────────────────────────────────
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+        X, y,
+        test_size=0.2,
+        random_state=42,
+        stratify=y
     )
-    print(f"Train size: {len(X_train)}   Test size: {len(X_test)}")
 
-    # ── 3. Build & train pipeline ─────────────────────────────────────────────
-    print("\nTraining model (TF-IDF char n-grams + LinearSVC) …")
-    t0 = time.time()
+    print(f"\nTrain size: {len(X_train)}")
+    print(f"Test size: {len(X_test)}")
+
     pipeline = build_pipeline()
+
+    print("\nTraining model...")
+
+    start = time.time()
     pipeline.fit(X_train, y_train)
-    elapsed = time.time() - t0
-    print(f"Training complete in {elapsed:.1f}s")
+    elapsed = time.time() - start
 
-    # ── 4. Evaluate on held-out test set ──────────────────────────────────────
+    print(f"Training completed in {elapsed:.2f}s")
+
+    # ───────── Evaluation ─────────
+
     y_pred = pipeline.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    print(f"\n{'='*55}")
-    print(f"  Test Accuracy: {acc*100:.2f}%")
-    print(f"{'='*55}")
-    print("\nPer-language classification report:")
-    print(classification_report(y_test, y_pred, zero_division=0))
 
-    # ── 5. Cross-validation (optional sanity check) ───────────────────────────
-    print("Running 5-fold cross-validation …")
+    accuracy = accuracy_score(y_test, y_pred)
+
+    print("\n" + "="*60)
+    print(f"Test Accuracy: {accuracy*100:.2f}%")
+    print("="*60)
+
+    print("\nClassification Report:\n")
+    print(classification_report(y_test, y_pred))
+
+    # ───────── Cross Validation ─────────
+
+    print("\nRunning cross-validation...")
+
     cv_scores = cross_val_score(
-        build_pipeline(), X, y,
+        build_pipeline(),
+        X,
+        y,
         cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
         scoring="accuracy",
-        n_jobs=-1,
+        n_jobs=-1
     )
+
     print(f"CV Accuracy: {cv_scores.mean()*100:.2f}% ± {cv_scores.std()*100:.2f}%")
 
-    # ── 6. Save model ─────────────────────────────────────────────────────────
+    # ───────── Save Model ─────────
+
     with open(model_path, "wb") as f:
         pickle.dump(pipeline, f)
+
     print(f"\nModel saved → {model_path}")
 
-    # Save label list for reference
     labels_path = os.path.join(model_dir, "languages.txt")
+
     with open(labels_path, "w", encoding="utf-8") as f:
         f.write("\n".join(sorted(pipeline.classes_)))
-    print(f"Language labels saved → {labels_path}")
+
+    print(f"Language list saved → {labels_path}")
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train the language detection model")
+
+    parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--dataset",
-        default=DEFAULT_DATASET,
-        help=f"Path to CSV dataset (default: {DEFAULT_DATASET})",
+        default=DEFAULT_DATASET
     )
+
     parser.add_argument(
         "--model-dir",
-        default=DEFAULT_MODEL_DIR,
-        help=f"Directory to save trained model (default: {DEFAULT_MODEL_DIR})",
+        default=DEFAULT_MODEL_DIR
     )
-    args = parser.parse_args()
 
-    # Auto-generate dataset if not present
-    if not os.path.exists(args.dataset):
-        print(f"Dataset not found at {args.dataset}. Generating …")
-        sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
-        from generate_dataset import generate_dataset
-        generate_dataset(args.dataset)
+    args = parser.parse_args()
 
     train(args.dataset, args.model_dir)
